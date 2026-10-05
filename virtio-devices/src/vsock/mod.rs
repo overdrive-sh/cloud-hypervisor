@@ -12,6 +12,7 @@ mod csm;
 mod device;
 mod packet;
 mod unix;
+mod vhost_kernel;
 
 use std::os::unix::io::RawFd;
 use std::result;
@@ -21,6 +22,7 @@ use thiserror::Error;
 
 pub use self::device::Vsock;
 pub use self::unix::{VsockUnixBackend, VsockUnixError};
+pub use self::vhost_kernel::{Error as VhostKernelVsockError, VhostKernelVsock};
 
 mod defs {
 

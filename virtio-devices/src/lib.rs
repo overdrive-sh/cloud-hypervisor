@@ -58,7 +58,7 @@ pub use self::pmem::Pmem;
 pub use self::rng::Rng;
 pub use self::rtc::Rtc;
 pub use self::vdpa::{Vdpa, VdpaDmaMapping};
-pub use self::vsock::Vsock;
+pub use self::vsock::{VhostKernelVsock, Vsock};
 pub use self::watchdog::Watchdog;
 
 type GuestMemoryMmap = vm_memory::GuestMemoryMmap<AtomicBitmap>;
@@ -123,6 +123,8 @@ pub enum ActivateError {
     CreateRateLimiter(#[source] io::Error),
     #[error("Failed to activate the vDPA device")]
     ActivateVdpa(#[source] vdpa::Error),
+    #[error("Failed to activate the vhost-kernel vsock device")]
+    ActivateVhostKernelVsock(#[source] vsock::VhostKernelVsockError),
     #[error("Failed to create TimerFd")]
     CreateTimerFd(#[source] ErrnoError),
 }
@@ -143,6 +145,8 @@ pub enum Error {
     VhostUserAddMemoryRegion(#[source] vhost_user::Error),
     #[error("Failed to set shared memory region")]
     SetShmRegionsNotSupported,
+    #[error("Failed to update the vhost-kernel vsock memory table")]
+    VhostKernelVsockUpdateMemory(#[source] vsock::VhostKernelVsockError),
     #[error("Failed to process net queue")]
     NetQueuePair(#[source] ::net_util::NetQueuePairError),
 }

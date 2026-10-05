@@ -37,6 +37,7 @@ vhost = { workspace = true, features = [
   "vhost-user-backend",
   "vhost-user-frontend",
   "vhost-vdpa",
+  "vhost-vsock",
 ] }
 virtio-bindings = { workspace = true }
 virtio-queue = { workspace = true }

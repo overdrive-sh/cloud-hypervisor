@@ -31,6 +31,7 @@ pub enum Thread {
     VirtioGenericVhostUser,
     VirtioVhostNet,
     VirtioVhostNetCtl,
+    VirtioVhostKernelVsock,
     VirtioVsock,
     VirtioWatchdog,
 }
@@ -312,6 +313,15 @@ fn virtio_vsock_thread_rules() -> Vec<(i64, Vec<SeccompRule>)> {
     ]
 }
 
+fn virtio_vhost_kernel_vsock_thread_rules() -> Vec<(i64, Vec<SeccompRule>)> {
+    vec![
+        (libc::SYS_sched_getaffinity, vec![]),
+        (libc::SYS_set_robust_list, vec![]),
+        #[cfg(feature = "sev_snp")]
+        (libc::SYS_ioctl, create_mshv_sev_snp_ioctl_seccomp_rule()),
+    ]
+}
+
 fn virtio_watchdog_thread_rules() -> Vec<(i64, Vec<SeccompRule>)> {
     vec![
         (libc::SYS_sched_getaffinity, vec![]),
@@ -337,6 +347,7 @@ fn get_seccomp_rules(thread_type: Thread) -> Vec<(i64, Vec<SeccompRule>)> {
         Thread::VirtioGenericVhostUser => virtio_generic_vhost_user_thread_rules(),
         Thread::VirtioVhostNet => virtio_vhost_net_thread_rules(),
         Thread::VirtioVhostNetCtl => virtio_vhost_net_ctl_thread_rules(),
+        Thread::VirtioVhostKernelVsock => virtio_vhost_kernel_vsock_thread_rules(),
         Thread::VirtioVsock => virtio_vsock_thread_rules(),
         Thread::VirtioWatchdog => virtio_watchdog_thread_rules(),
     };

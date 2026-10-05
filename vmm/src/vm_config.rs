@@ -970,23 +970,58 @@ impl ApplyLandlock for VdpaConfig {
     }
 }
 
+/// Where guest vsock traffic terminates on the host.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum VsockBackend {
+    /// The VMM terminates guest vsock traffic and proxies it to a Unix domain
+    /// socket (`socket=`).
+    #[default]
+    Unix,
+    /// The host kernel `vhost-vsock` driver services the virtqueues; host
+    /// applications use `AF_VSOCK` sockets addressed to the guest CID.
+    VhostKernel,
+}
+
+impl VsockBackend {
+    pub fn is_unix(&self) -> bool {
+        *self == VsockBackend::Unix
+    }
+}
+
+/// Character device of the host kernel vhost-vsock driver.
+pub const VHOST_VSOCK_DEVICE_PATH: &str = "/dev/vhost-vsock";
+
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub struct VsockConfig {
     #[serde(flatten)]
     pub pci_common: PciDeviceCommonConfig,
     pub cid: u32,
-    pub socket: PathBuf,
+    /// Unix domain socket used by the `unix` backend. Must be absent for
+    /// `vhost-kernel`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub socket: Option<PathBuf>,
+    /// UNIX listener socket type for host initiated connections (`unix`
+    /// backend only).
     #[serde(default)]
     pub socket_type: SocketType,
+    #[serde(default, skip_serializing_if = "VsockBackend::is_unix")]
+    pub backend: VsockBackend,
 }
 
 impl ApplyLandlock for VsockConfig {
     fn apply_landlock(&self, landlock: &mut Landlock) -> LandlockResult<()> {
-        if let Some(parent) = self.socket.parent() {
-            landlock.add_rule(parent, AccessFs::MakeSock.into())?;
+        if let Some(socket) = &self.socket {
+            if let Some(parent) = socket.parent() {
+                landlock.add_rule(parent, AccessFs::MakeSock.into())?;
+            }
+
+            landlock.add_rule_with_access(socket, "rw")?;
         }
 
-        landlock.add_rule_with_access(&self.socket, "rw")?;
+        if self.backend == VsockBackend::VhostKernel {
+            landlock.add_rule_with_access(Path::new(VHOST_VSOCK_DEVICE_PATH), "rw")?;
+        }
 
         Ok(())
     }

@@ -1716,7 +1716,6 @@ components:
     VsockConfig:
       required:
         - cid
-        - socket
       type: object
       properties:
         cid:
@@ -1727,12 +1726,17 @@ components:
           description: Guest Vsock CID
         socket:
           type: string
-          description: Path to UNIX domain socket, used to proxy vsock connections.
+          description: Path to UNIX domain socket, used to proxy vsock connections. Required by the unix backend; must be absent for vhost-kernel.
         socket_type:
           type: string
           enum: [Stream, SeqPacket]
           default: Stream
-          description: UNIX listener socket type for host initiated connections.
+          description: UNIX listener socket type for host initiated connections (unix backend only).
+        backend:
+          type: string
+          enum: ["unix", "vhost-kernel"]
+          default: "unix"
+          description: Where guest vsock traffic terminates. unix proxies connections to the socket; vhost-kernel hands the device to the host kernel vhost-vsock driver.
         iommu:
           $ref: "#/components/schemas/IommuType"
         pci_segment:

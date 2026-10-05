@@ -1,6 +1,9 @@
 # VSOCK support
 
-VSOCK provides a way for guest and host to communicate through a socket. `cloud-hypervisor` supports STREAM and SEQPACKET VSOCK sockets.
+VSOCK provides a way for guest and host to communicate through a socket. `cloud-hypervisor` offers two backends, selected with `backend=`:
+
+- `unix` (default): the VMM terminates guest vsock traffic and proxies connections to a Unix domain socket. STREAM and SEQPACKET VSOCK sockets are supported.
+- `vhost-kernel`: the host kernel `vhost-vsock` driver services the virtqueues. Host applications use ordinary `AF_VSOCK` sockets addressed to the guest CID; both stream and seqpacket sockets are supported. See [vhost-kernel backend](#vhost-kernel-backend).
 
 The `virtio-vsock` is based on the [Firecracker](https://github.com/firecracker-microvm/firecracker/blob/main/docs/vsock.md) implementation, where additional details can be found.
 
@@ -95,6 +98,30 @@ For a SEQPACKET host connection, send `CONNECT <guest-port>\n` as the first
 UNIX record, with no application payload. After the guest accepts, Cloud
 Hypervisor sends `OK <allocated-host-port>\n` as a separate record. Application
 records can then flow in both directions.
+
+## vhost-kernel backend
+
+```bash
+cloud-hypervisor \
+	--cpus boot=1 \
+	--memory size=4G \
+	--kernel vmlinux \
+	--disk path=jammy-server-cloudimg.raw \
+	--vsock cid=3,backend=vhost-kernel
+```
+
+The VMM opens `/dev/vhost-vsock` (host kernel `CONFIG_VHOST_VSOCK`, module `vhost_vsock`) and hands it the RX and TX virtqueues. The kernel vhost worker moves packets between the guest rings and the host `AF_VSOCK` stack, so the VMM process never reads or writes vsock payload. The VMM keeps the event virtqueue.
+
+The guest CID is claimed in the host kernel when the device is created and released when it is destroyed. A CID already claimed by another VM, or by a host-local vsock transport, makes device creation fail (`EADDRINUSE`); there is no silent fallback.
+
+From the host, connect to a guest listener with any `AF_VSOCK` client, e.g. `socat - VSOCK-CONNECT:3:1234`. Guest connections to CID `2` reach host `AF_VSOCK` listeners, e.g. `socat - VSOCK-LISTEN:1234`. There is no `CONNECT <port>` preamble.
+
+Restrictions:
+
+- `socket=` must not be given.
+- An attached virtual IOMMU (`iommu=virtio`) is rejected (the backend does not implement the vhost IOTLB), as are confidential VMs that force `VIRTIO_F_ACCESS_PLATFORM`.
+- Snapshot/restore and live migration are refused with an error: connection state lives in the host kernel.
+- The calling user needs read/write access to `/dev/vhost-vsock`.
 
 ## Links
 

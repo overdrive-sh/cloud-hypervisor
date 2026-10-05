@@ -136,7 +136,7 @@ use crate::vm_config::IvshmemConfig;
 use crate::vm_config::{
     ConsoleOutputMode, DEFAULT_IOMMU_ADDRESS_WIDTH_BITS, DEFAULT_PCI_SEGMENT_APERTURE_WEIGHT,
     DeviceConfig, DiskConfig, FsConfig, GenericVhostUserConfig, NetConfig, PciDeviceCommonConfig,
-    PmemConfig, UserDeviceConfig, VdpaConfig, VhostMode, VmConfig, VsockConfig,
+    PmemConfig, UserDeviceConfig, VdpaConfig, VhostMode, VmConfig, VsockBackend, VsockConfig,
 };
 use crate::{DEVICE_MANAGER_SNAPSHOT_ID, GuestRegionMmap, PciDeviceInfo, device_node};
 
@@ -258,6 +258,14 @@ pub enum DeviceManagerError {
     /// Cannot create virtio-vsock backend
     #[error("Cannot create virtio-vsock backend")]
     CreateVsockBackend(#[source] vsock::VsockUnixError),
+
+    /// Cannot create the vhost-kernel virtio-vsock device
+    #[error("Cannot create vhost-kernel virtio-vsock device")]
+    CreateVhostKernelVsock(#[source] vsock::VhostKernelVsockError),
+
+    /// The unix virtio-vsock backend needs a socket path
+    #[error("The unix virtio-vsock backend requires a socket path")]
+    VsockSocketMissing,
 
     /// Cannot create virtio-iommu device
     #[error("Cannot create virtio-iommu device")]
@@ -3518,41 +3526,70 @@ impl DeviceManager {
 
         info!("Creating virtio-vsock device: {vsock_cfg:?}");
 
-        let socket_path = vsock_cfg
-            .socket
-            .to_str()
-            .ok_or(DeviceManagerError::CreateVsockConvertPath)?;
-        let backend = vsock::VsockUnixBackend::new(vsock_cfg.cid, socket_path.to_string())
-            .map_err(DeviceManagerError::CreateVsockBackend)?;
+        let virtio_device: Arc<Mutex<dyn virtio_devices::VirtioDevice>> = match vsock_cfg.backend {
+            VsockBackend::Unix => {
+                let socket = vsock_cfg
+                    .socket
+                    .clone()
+                    .ok_or(DeviceManagerError::VsockSocketMissing)?;
+                let socket_path = socket
+                    .to_str()
+                    .ok_or(DeviceManagerError::CreateVsockConvertPath)?;
+                let backend = vsock::VsockUnixBackend::new(vsock_cfg.cid, socket_path.to_string())
+                    .map_err(DeviceManagerError::CreateVsockBackend)?;
 
-        let vsock_device = Arc::new(Mutex::new(
-            virtio_devices::Vsock::new(
-                id.clone(),
-                vsock_cfg.cid,
-                vsock_cfg.socket.clone(),
-                backend,
-                self.force_access_platform | vsock_cfg.pci_common.iommu,
-                self.seccomp_action.clone(),
-                self.exit_evt
-                    .try_clone()
-                    .map_err(DeviceManagerError::EventFd)?,
-                state_from_id(snapshot, id.as_str())
-                    .map_err(DeviceManagerError::RestoreGetState)?,
-            )
-            .map_err(DeviceManagerError::CreateVirtioVsock)?,
-        ));
+                let vsock_device = Arc::new(Mutex::new(
+                    virtio_devices::Vsock::new(
+                        id.clone(),
+                        vsock_cfg.cid,
+                        socket,
+                        backend,
+                        self.force_access_platform | vsock_cfg.pci_common.iommu,
+                        self.seccomp_action.clone(),
+                        self.exit_evt
+                            .try_clone()
+                            .map_err(DeviceManagerError::EventFd)?,
+                        state_from_id(snapshot, id.as_str())
+                            .map_err(DeviceManagerError::RestoreGetState)?,
+                    )
+                    .map_err(DeviceManagerError::CreateVirtioVsock)?,
+                ));
 
-        // Fill the device tree with a new node. In case of restore, we
-        // know there is nothing to do, so we can simply override the
-        // existing entry.
-        self.device_tree
-            .lock()
-            .unwrap()
-            .insert(id.clone(), device_node!(id, vsock_device));
+                // Fill the device tree with a new node. In case of restore, we
+                // know there is nothing to do, so we can simply override the
+                // existing entry.
+                self.device_tree
+                    .lock()
+                    .unwrap()
+                    .insert(id.clone(), device_node!(id, vsock_device));
+                vsock_device
+            }
+            VsockBackend::VhostKernel => {
+                let vsock_device = Arc::new(Mutex::new(
+                    virtio_devices::VhostKernelVsock::new(
+                        id.clone(),
+                        vsock_cfg.cid,
+                        self.memory_manager.lock().unwrap().guest_memory(),
+                        self.force_access_platform | vsock_cfg.pci_common.iommu,
+                        self.seccomp_action.clone(),
+                        self.exit_evt
+                            .try_clone()
+                            .map_err(DeviceManagerError::EventFd)?,
+                        snapshot.is_some(),
+                    )
+                    .map_err(DeviceManagerError::CreateVhostKernelVsock)?,
+                ));
+
+                self.device_tree
+                    .lock()
+                    .unwrap()
+                    .insert(id.clone(), device_node!(id, vsock_device));
+                vsock_device
+            }
+        };
 
         Ok(MetaVirtioDevice {
-            virtio_device: Arc::clone(&vsock_device)
-                as Arc<Mutex<dyn virtio_devices::VirtioDevice>>,
+            virtio_device,
             pci_common: vsock_cfg.pci_common.clone(),
             dma_handler: None,
         })

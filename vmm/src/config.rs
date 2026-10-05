@@ -305,6 +305,15 @@ pub enum ValidationError {
     /// VSOCK Context Identifier has a special meaning, unsuitable for a VM.
     #[error("{0} is a special VSOCK CID")]
     VsockSpecialCid(u32),
+    /// The unix vsock backend needs a socket path.
+    #[error("The unix vsock backend requires a socket path")]
+    VsockSocketMissing,
+    /// The vhost-kernel vsock backend has no socket to proxy to.
+    #[error("The vhost-kernel vsock backend does not take a socket path")]
+    VsockSocketWithVhostKernel,
+    /// The vhost-kernel vsock backend cannot sit behind a virtual IOMMU.
+    #[error("The vhost-kernel vsock backend does not support iommu=on")]
+    VsockVhostKernelIommu,
     /// Memory zone is reused across NUMA nodes
     #[error("Memory zone: {0} belongs to multiple NUMA nodes: {1} and {2}")]
     MemoryZoneReused(String, u32, u32),
@@ -1663,6 +1672,23 @@ impl DiskConfig {
 }
 
 #[derive(Debug)]
+pub enum ParseVsockBackendError {
+    InvalidValue(String),
+}
+
+impl FromStr for VsockBackend {
+    type Err = ParseVsockBackendError;
+
+    fn from_str(s: &str) -> result::Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "unix" => Ok(VsockBackend::Unix),
+            "vhost-kernel" => Ok(VsockBackend::VhostKernel),
+            _ => Err(ParseVsockBackendError::InvalidValue(s.to_owned())),
+        }
+    }
+}
+
+#[derive(Debug)]
 pub enum ParseVhostModeError {
     InvalidValue(String),
 }
@@ -2589,22 +2615,30 @@ impl VdpaConfig {
 
 impl VsockConfig {
     pub const SYNTAX: &'static str = "Virtio VSOCK parameters \
-        \"cid=<context_id>,socket=<socket_path>,iommu=on|off,id=<device_id>,\
-        pci_segment=<segment_id>,pci_device_id=<pci_slot>\"";
+        \"cid=<context_id>,socket=<socket_path>,backend=unix|vhost-kernel,iommu=on|off,\
+        id=<device_id>,pci_segment=<segment_id>,pci_device_id=<pci_slot>\". \
+        backend=unix (default) proxies stream connections to <socket_path>; \
+        backend=vhost-kernel hands the device to the host kernel vhost-vsock \
+        driver (no socket, no iommu)";
 
     pub fn parse(vsock: &str) -> Result<Self> {
         let mut parser = OptionParser::new();
         parser
             .add("socket")
             .add("cid")
+            .add("backend")
             .add_all(PciDeviceCommonConfig::OPTIONS_IOMMU);
         parser.parse(vsock).map_err(Error::ParseVsock)?;
 
         let pci_common = PciDeviceCommonConfig::parse(vsock)?;
-        let socket = parser
-            .get("socket")
-            .map(PathBuf::from)
-            .ok_or(Error::ParseVsockSockMissing)?;
+        let backend = parser
+            .convert("backend")
+            .map_err(Error::ParseVsock)?
+            .unwrap_or_default();
+        let socket = parser.get("socket").map(PathBuf::from);
+        if backend == VsockBackend::Unix && socket.is_none() {
+            return Err(Error::ParseVsockSockMissing);
+        }
         let cid = parser
             .convert("cid")
             .map_err(Error::ParseVsock)?
@@ -2614,10 +2648,23 @@ impl VsockConfig {
             pci_common,
             cid,
             socket,
+            backend,
         })
     }
 
     pub fn validate(&self, vm_config: &VmConfig) -> ValidationResult<()> {
+        match self.backend {
+            VsockBackend::Unix if self.socket.is_none() => {
+                return Err(ValidationError::VsockSocketMissing);
+            }
+            VsockBackend::VhostKernel if self.socket.is_some() => {
+                return Err(ValidationError::VsockSocketWithVhostKernel);
+            }
+            VsockBackend::VhostKernel if self.pci_common.iommu => {
+                return Err(ValidationError::VsockVhostKernelIommu);
+            }
+            _ => {}
+        }
         self.pci_common.validate(vm_config)
     }
 }
@@ -4949,7 +4996,8 @@ id=\"{id}\",pci_segment={pci_segment},queue_sizes={queue_sizes}"
             VsockConfig {
                 pci_common: PciDeviceCommonConfig::default(),
                 cid: 3,
-                socket: PathBuf::from("/tmp/sock"),
+                socket: Some(PathBuf::from("/tmp/sock")),
+                backend: VsockBackend::Unix,
             }
         );
         assert_eq!(
@@ -4960,10 +5008,46 @@ id=\"{id}\",pci_segment={pci_segment},queue_sizes={queue_sizes}"
                     ..Default::default()
                 },
                 cid: 3,
-                socket: PathBuf::from("/tmp/sock"),
+                socket: Some(PathBuf::from("/tmp/sock")),
+                backend: VsockBackend::Unix,
             }
         );
+        assert_eq!(
+            VsockConfig::parse("socket=/tmp/sock,cid=3,backend=unix")?,
+            VsockConfig::parse("socket=/tmp/sock,cid=3")?
+        );
+        assert_eq!(
+            VsockConfig::parse("cid=4,backend=vhost-kernel")?,
+            VsockConfig {
+                pci_common: PciDeviceCommonConfig::default(),
+                cid: 4,
+                socket: None,
+                backend: VsockBackend::VhostKernel,
+            }
+        );
+        // The unix backend still requires a socket.
+        assert!(matches!(
+            VsockConfig::parse("cid=3,backend=unix"),
+            Err(Error::ParseVsockSockMissing)
+        ));
+        VsockConfig::parse("cid=3,backend=bogus").unwrap_err();
         Ok(())
+    }
+
+    #[test]
+    fn test_vsock_config_serde() {
+        // Pre-existing unix JSON keeps its shape and meaning.
+        let unix: VsockConfig =
+            serde_json::from_str(r#"{"cid": 3, "socket": "/tmp/sock"}"#).unwrap();
+        assert_eq!(unix.backend, VsockBackend::Unix);
+        assert_eq!(
+            serde_json::to_value(&unix).unwrap(),
+            serde_json::json!({"cid": 3, "socket": "/tmp/sock", "pci_segment": 0})
+        );
+        let vhost: VsockConfig =
+            serde_json::from_str(r#"{"cid": 4, "backend": "vhost-kernel"}"#).unwrap();
+        assert_eq!(vhost.backend, VsockBackend::VhostKernel);
+        assert_eq!(vhost.socket, None);
     }
 
     #[test]
@@ -5945,7 +6029,8 @@ id=\"{id}\",pci_segment={pci_segment},queue_sizes={queue_sizes}"
                 ..Default::default()
             },
             cid: 3,
-            socket: PathBuf::new(),
+            socket: Some(PathBuf::new()),
+            backend: VsockBackend::Unix,
         });
         still_valid_config.validate().unwrap();
 
@@ -6032,7 +6117,8 @@ id=\"{id}\",pci_segment={pci_segment},queue_sizes={queue_sizes}"
                 ..Default::default()
             },
             cid: 3,
-            socket: PathBuf::new(),
+            socket: Some(PathBuf::new()),
+            backend: VsockBackend::Unix,
         });
         assert_eq!(
             invalid_config.validate(),
@@ -6541,6 +6627,47 @@ id=\"{id}\",pci_segment={pci_segment},queue_sizes={queue_sizes}"
             invalid_config.validate(),
             Err(ValidationError::IdentifierNotUnique("test0".to_string()))
         );
+
+        // vsock backend selection
+        {
+            let vhost_kernel = VsockConfig::parse("cid=3,backend=vhost-kernel").unwrap();
+
+            let mut config = valid_config.clone();
+            config.vsock = Some(vhost_kernel.clone());
+            config.validate().unwrap();
+
+            let mut config = valid_config.clone();
+            config.vsock = Some(VsockConfig {
+                socket: Some(PathBuf::from("/tmp/sock")),
+                ..vhost_kernel.clone()
+            });
+            assert_eq!(
+                config.validate(),
+                Err(ValidationError::VsockSocketWithVhostKernel)
+            );
+
+            let mut config = valid_config.clone();
+            config.vsock = Some(VsockConfig {
+                pci_common: PciDeviceCommonConfig {
+                    iommu: true,
+                    ..Default::default()
+                },
+                ..vhost_kernel
+            });
+            assert_eq!(
+                config.validate(),
+                Err(ValidationError::VsockVhostKernelIommu)
+            );
+
+            let mut config = valid_config.clone();
+            config.vsock = Some(VsockConfig {
+                pci_common: PciDeviceCommonConfig::default(),
+                cid: 3,
+                socket: None,
+                backend: VsockBackend::Unix,
+            });
+            assert_eq!(config.validate(), Err(ValidationError::VsockSocketMissing));
+        }
     }
     #[test]
     fn test_landlock_parsing() -> Result<()> {

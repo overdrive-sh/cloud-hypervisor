@@ -22,11 +22,12 @@ use seccompiler::{
 };
 use vhost::vhost_kern::vhost_binding::{
     VHOST_GET_BACKEND_FEATURES, VHOST_GET_FEATURES, VHOST_SET_BACKEND_FEATURES, VHOST_SET_FEATURES,
-    VHOST_SET_OWNER, VHOST_SET_VRING_ADDR, VHOST_SET_VRING_BASE, VHOST_SET_VRING_CALL,
-    VHOST_SET_VRING_KICK, VHOST_SET_VRING_NUM, VHOST_VDPA_GET_CONFIG, VHOST_VDPA_GET_CONFIG_SIZE,
-    VHOST_VDPA_GET_DEVICE_ID, VHOST_VDPA_GET_IOVA_RANGE, VHOST_VDPA_GET_STATUS,
-    VHOST_VDPA_GET_VRING_NUM, VHOST_VDPA_SET_CONFIG, VHOST_VDPA_SET_CONFIG_CALL,
-    VHOST_VDPA_SET_STATUS, VHOST_VDPA_SET_VRING_ENABLE, VHOST_VDPA_SUSPEND,
+    VHOST_SET_MEM_TABLE, VHOST_SET_OWNER, VHOST_SET_VRING_ADDR, VHOST_SET_VRING_BASE,
+    VHOST_SET_VRING_CALL, VHOST_SET_VRING_KICK, VHOST_SET_VRING_NUM, VHOST_VDPA_GET_CONFIG,
+    VHOST_VDPA_GET_CONFIG_SIZE, VHOST_VDPA_GET_DEVICE_ID, VHOST_VDPA_GET_IOVA_RANGE,
+    VHOST_VDPA_GET_STATUS, VHOST_VDPA_GET_VRING_NUM, VHOST_VDPA_SET_CONFIG,
+    VHOST_VDPA_SET_CONFIG_CALL, VHOST_VDPA_SET_STATUS, VHOST_VDPA_SET_VRING_ENABLE,
+    VHOST_VDPA_SUSPEND, VHOST_VSOCK_SET_GUEST_CID, VHOST_VSOCK_SET_RUNNING,
 };
 
 use crate::userfaultfd::{
@@ -391,6 +392,14 @@ fn create_vmm_ioctl_seccomp_rule_common(
         and![Cond::new(1, ArgLen::Dword, Eq, VHOST_SET_VRING_BASE())?],
         and![Cond::new(1, ArgLen::Dword, Eq, VHOST_SET_VRING_KICK())?],
         and![Cond::new(1, ArgLen::Dword, Eq, VHOST_SET_VRING_CALL())?],
+        and![Cond::new(1, ArgLen::Dword, Eq, VHOST_SET_MEM_TABLE())?],
+        and![Cond::new(
+            1,
+            ArgLen::Dword,
+            Eq,
+            VHOST_VSOCK_SET_GUEST_CID()
+        )?],
+        and![Cond::new(1, ArgLen::Dword, Eq, VHOST_VSOCK_SET_RUNNING())?],
         and![Cond::new(
             1,
             ArgLen::Dword,
@@ -879,6 +888,8 @@ fn create_vcpu_ioctl_seccomp_rule(
             Eq,
             VHOST_VDPA_SET_VRING_ENABLE(),
         )?],
+        // vhost-kernel vsock is stopped when the guest resets the device.
+        and![Cond::new(1, ArgLen::Dword, Eq, VHOST_VSOCK_SET_RUNNING())?],
     ];
 
     let hypervisor_rules = create_vcpu_ioctl_seccomp_rule_hypervisor(hypervisor_type)?;

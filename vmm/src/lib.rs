@@ -2089,8 +2089,8 @@ impl Vmm {
                         info!("VM reset event");
                         // Consume the event.
                         self.reset_evt.read().map_err(Error::EventFdRead)?;
-                        // TODO: Future follow-up must resolve lifecycle handling while migrating.
-                        self.vm_reboot().map_err(Error::VmReboot)?;
+                        self.vmm_shutdown().map_err(Error::VmmShutdown)?;
+                        break 'outer;
                     }
                     EpollDispatch::GuestExit => {
                         info!("VM guest exit event");

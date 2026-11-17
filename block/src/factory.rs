@@ -9,7 +9,7 @@
 //! support, and constructs the appropriate backend. Callers receive
 //! a trait object that is ready for use by virtio queue workers.
 
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{FileTypeExt, OpenOptionsExt};
 use std::path::Path;
 use std::sync::OnceLock;
 use std::{fs, io};
@@ -71,8 +71,19 @@ pub fn open_disk(
     let mut fs_options = fs::OpenOptions::new();
     fs_options.read(true);
     fs_options.write(!options.readonly);
+    let mut flags = 0;
     if options.direct {
-        fs_options.custom_flags(libc::O_DIRECT);
+        flags |= libc::O_DIRECT;
+    }
+    // Claim a block device exclusively: the kernel arbitrates by device, so a second
+    // node or path naming the same device cannot be claimed by another O_EXCL opener.
+    if !options.readonly
+        && fs::metadata(options.path).is_ok_and(|m| m.file_type().is_block_device())
+    {
+        flags |= libc::O_EXCL;
+    }
+    if flags != 0 {
+        fs_options.custom_flags(flags);
     }
 
     let mut file = open_disk_image(options.path, &fs_options)?;

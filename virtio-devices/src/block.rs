@@ -553,7 +553,21 @@ impl BlockEpollHandler {
                     }
                     RequestType::Out => {
                         if !request.writeback {
-                            self.disk_image.fsync(None).map_err(Error::Fsync)?;
+                            if let Err(e) = self.disk_image.fsync(None) {
+                                // Write-through: the guest was promised the data is on the
+                                // device when the write completes. Complete this request with
+                                // IOERR instead of abandoning it or reporting success.
+                                warn!("Write-through fsync failed: {request:x?} {e:?}");
+                                mem.write_obj(VIRTIO_BLK_S_IOERR as u8, request.status_addr())
+                                    .map_err(Error::RequestStatus)?;
+                                self.queue
+                                    .add_used(mem.deref(), desc_index, 1)
+                                    .map_err(Error::QueueAddUsed)?;
+                                self.queue
+                                    .enable_notification(mem.deref())
+                                    .map_err(Error::QueueEnableNotification)?;
+                                continue;
+                            }
                         }
                         for (_, data_len) in request.data_descriptors() {
                             write_bytes += Wrapping(*data_len as u64);

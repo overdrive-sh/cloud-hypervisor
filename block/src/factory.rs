@@ -37,6 +37,10 @@ pub struct DiskOpenOptions<'a> {
     pub backing_files: bool,
     pub disable_io_uring: bool,
     pub disable_aio: bool,
+    /// The image type the configuration states. `ImageType::Unknown` asks for
+    /// detection from the file header; any other value is trusted and the
+    /// guest-writable header bytes are not read.
+    pub image_type: ImageType,
 }
 
 /// Result of [`open_disk`], carrying the detected image type alongside
@@ -91,7 +95,11 @@ pub fn open_disk(options: &DiskOpenOptions<'_>) -> BlockResult<OpenedDisk> {
     }
 
     let mut file = open_disk_image(options.path, &fs_options)?;
-    let image_type = detect_image_type(&mut file)?;
+    let image_type = if options.image_type == ImageType::Unknown {
+        detect_image_type(&mut file)?
+    } else {
+        options.image_type
+    };
 
     let disk: Box<dyn AsyncFullDiskFile> = match image_type {
         ImageType::FixedVhd => open_fixed_vhd(file, options)?,
@@ -233,6 +241,7 @@ mod unit_tests {
             backing_files: false,
             disable_io_uring: true,
             disable_aio: true,
+            image_type: ImageType::Unknown,
         }
     }
 
@@ -292,6 +301,7 @@ mod unit_tests {
             backing_files: false,
             disable_io_uring: true,
             disable_aio: true,
+            image_type: ImageType::Unknown,
         };
         let opened = open_disk(&options).unwrap();
         assert_eq!(opened.image_type, ImageType::Raw);

@@ -422,7 +422,7 @@ struct Cli {
     #[arg(
         long,
         help = "Action when the guest resets",
-        default_value = "reset-vm",
+        default_value = "exit-vmm",
         group = "vmm-config"
     )]
     guest_reset_action: CliGuestResetAction,
@@ -1214,7 +1214,7 @@ mod tests {
     #[test]
     fn test_reset_action() {
         for (options, expected) in [
-            (vec![], GuestResetAction::ResetVm),
+            (vec![], GuestResetAction::ExitVmm),
             (
                 vec!["--guest-reset-action", "reset-vm"],
                 GuestResetAction::ResetVm,
@@ -1227,7 +1227,7 @@ mod tests {
                 vec!["--guest-reset-action=shutdown-vm"],
                 GuestResetAction::ShutdownVm,
             ),
-            (vec!["--no-shutdown"], GuestResetAction::ResetVm),
+            (vec!["--no-shutdown"], GuestResetAction::ExitVmm),
             (
                 vec![
                     "--guest-shutdown-action=shutdown-vm",

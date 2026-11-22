@@ -7,6 +7,7 @@ mod logger;
 #[cfg(test)]
 mod test_util;
 
+use std::error::Error as StdError;
 use std::fs::{self, File};
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::path::Path;
@@ -14,8 +15,9 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::ptr::from_ref;
 use std::sync::mpsc::channel;
-use std::{any, cmp, env, io, num, process};
+use std::{any, cmp, env, io, iter, num, process};
 
+use block::error::{BlockError, BlockErrorKind, ErrorOp};
 use clap::{ArgAction, ArgGroup, Parser, ValueEnum};
 use event_monitor::event;
 use libc::EFD_NONBLOCK;
@@ -1127,6 +1129,27 @@ fn expand_fdtable() -> Result<(), FdTableError> {
     Ok(())
 }
 
+/// Exit status when a disk could not be opened because another holder has the
+/// block device: its exclusive (`O_EXCL`) open failed with `EBUSY`. Every other
+/// failure exits 1.
+const EXIT_DISK_BUSY: i32 = 111;
+
+/// Whether the error chain holds a disk open that failed with `EBUSY`, read from
+/// the typed [`BlockError`] (kind, operation and OS error), not from its text.
+fn is_disk_busy(top_error: &(dyn StdError + 'static)) -> bool {
+    iter::successors(Some(top_error), |e| (*e).source()).any(|e| {
+        e.downcast_ref::<BlockError>().is_some_and(|block_error| {
+            block_error.kind() == BlockErrorKind::Io
+                && block_error
+                    .context()
+                    .is_some_and(|ctx| ctx.op == Some(ErrorOp::Open))
+                && block_error
+                    .downcast_ref::<io::Error>()
+                    .is_some_and(|io_error| io_error.raw_os_error() == Some(libc::EBUSY))
+        })
+    })
+}
+
 fn main() {
     #[cfg(all(feature = "sev_snp", not(target_arch = "x86_64")))]
     compile_error!("Feature 'sev_snp' needs target 'x86_64'");
@@ -1171,7 +1194,11 @@ fn main() {
         }
         Err(top_error) => {
             cloud_hypervisor::cli_print_error_chain(&top_error, "Cloud Hypervisor", |_, _, _| None);
-            1
+            if is_disk_busy(&top_error) {
+                EXIT_DISK_BUSY
+            } else {
+                1
+            }
         }
     };
 
@@ -1198,7 +1225,45 @@ mod tests {
     };
 
     use crate::test_util::assert_args_sorted;
-    use crate::{Cli, GuestResetAction, GuestShutdownAction, SeccompSiginfo};
+    use crate::{Cli, GuestResetAction, GuestShutdownAction, SeccompSiginfo, is_disk_busy};
+
+    #[derive(Debug, thiserror::Error)]
+    #[error("boot failed")]
+    struct Wrapper(#[source] block::error::BlockError);
+
+    fn open_error(os_error: i32, op: block::error::ErrorOp) -> Wrapper {
+        Wrapper(
+            block::error::BlockError::new(
+                block::error::BlockErrorKind::Io,
+                std::io::Error::from_raw_os_error(os_error),
+            )
+            .with_op(op)
+            .with_path("/dev/mapper/vol"),
+        )
+    }
+
+    #[test]
+    fn disk_busy_is_an_ebusy_disk_open() {
+        assert!(is_disk_busy(&open_error(
+            libc::EBUSY,
+            block::error::ErrorOp::Open
+        )));
+    }
+
+    #[test]
+    fn other_failures_are_not_disk_busy() {
+        assert!(!is_disk_busy(&open_error(
+            libc::ENOENT,
+            block::error::ErrorOp::Open
+        )));
+        assert!(!is_disk_busy(&open_error(
+            libc::EBUSY,
+            block::error::ErrorOp::Resize
+        )));
+        assert!(!is_disk_busy(&std::io::Error::from_raw_os_error(
+            libc::EBUSY
+        )));
+    }
 
     #[test]
     fn clap_cli_definition_is_valid() {

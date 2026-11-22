@@ -12,6 +12,7 @@ version = "56.0.0"
 
 [dependencies]
 api_client = { path = "../api_client" }
+block = { path = "../block" }
 clap = { workspace = true, features = [
   "color",
   "derive",
@@ -43,7 +44,6 @@ zbus = { workspace = true, features = [
 ], optional = true }
 
 [dev-dependencies]
-block = { path = "../block" }
 dirs = { workspace = true }
 net_util = { path = "../net_util" }
 test_infra = { path = "../test_infra" }

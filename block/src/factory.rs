@@ -237,6 +237,7 @@ fn open_flat_vmdk(
 
 #[cfg(test)]
 mod tests {
+    use std::os::fd::AsRawFd;
     use std::os::unix::fs::FileExt;
     use std::path::Path;
 
@@ -340,5 +341,98 @@ mod tests {
             let disk = open_disk(&options, ImageType::Raw).unwrap();
             assert_eq!(disk.logical_size().unwrap(), 1 << 20);
         }
+    }
+
+    /// A loop device over a temporary file, detached on drop. Needs root.
+    struct LoopDevice {
+        path: std::path::PathBuf,
+        _backing: TempFile,
+    }
+
+    impl LoopDevice {
+        const LOOP_SET_FD: libc::c_ulong = 0x4C00;
+        const LOOP_CLR_FD: libc::c_ulong = 0x4C01;
+        const LOOP_CTL_GET_FREE: libc::c_ulong = 0x4C82;
+
+        fn new() -> Self {
+            let backing = TempFile::new().unwrap();
+            backing.as_file().set_len(1 << 20).unwrap();
+            let control = fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open("/dev/loop-control")
+                .expect("a loop device needs root and /dev/loop-control");
+            // Tests in other processes ask for a free device at the same time and
+            // can be handed the same one: the loser of the attach gets EBUSY and asks again.
+            for _ in 0..64 {
+                // SAFETY: LOOP_CTL_GET_FREE takes no argument and returns a device number.
+                let number = unsafe { libc::ioctl(control.as_raw_fd(), Self::LOOP_CTL_GET_FREE) };
+                assert!(number >= 0, "{}", io::Error::last_os_error());
+                let path = std::path::PathBuf::from(format!("/dev/loop{number}"));
+                let device = fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(&path)
+                    .unwrap();
+                // SAFETY: LOOP_SET_FD takes the backing file descriptor.
+                let rc = unsafe {
+                    libc::ioctl(
+                        device.as_raw_fd(),
+                        Self::LOOP_SET_FD,
+                        backing.as_file().as_raw_fd(),
+                    )
+                };
+                if rc == 0 {
+                    return Self {
+                        path,
+                        _backing: backing,
+                    };
+                }
+                let error = io::Error::last_os_error();
+                assert_eq!(error.raw_os_error(), Some(libc::EBUSY), "{error}");
+            }
+            panic!("no free loop device after 64 attempts");
+        }
+    }
+
+    impl Drop for LoopDevice {
+        fn drop(&mut self) {
+            if let Ok(device) = fs::OpenOptions::new().read(true).open(&self.path) {
+                // SAFETY: LOOP_CLR_FD takes no argument.
+                unsafe { libc::ioctl(device.as_raw_fd(), Self::LOOP_CLR_FD) };
+            }
+        }
+    }
+
+    #[test]
+    fn writable_block_device_is_opened_exclusively() {
+        let device = LoopDevice::new();
+        let options = default_options(&device.path);
+
+        let holder = open_disk(&options, ImageType::Raw).unwrap();
+        // A second writable open of the same device, by this path or any other
+        // node naming it, is refused by the kernel while the first holds it.
+        match open_disk(&options, ImageType::Raw) {
+            Err(e) => {
+                assert_eq!(e.kind(), BlockErrorKind::Io);
+                let os_error = e
+                    .downcast_ref::<io::Error>()
+                    .and_then(io::Error::raw_os_error);
+                assert_eq!(os_error, Some(libc::EBUSY));
+            }
+            Ok(_) => panic!("a held block device was opened a second time"),
+        }
+        drop(holder);
+        open_disk(&options, ImageType::Raw).unwrap();
+    }
+
+    #[test]
+    fn readonly_block_device_is_not_claimed() {
+        let device = LoopDevice::new();
+        let mut options = default_options(&device.path);
+        let holder = open_disk(&options, ImageType::Raw).unwrap();
+        options.readonly = true;
+        open_disk(&options, ImageType::Raw).unwrap();
+        drop(holder);
     }
 }

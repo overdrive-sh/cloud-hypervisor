@@ -135,4 +135,16 @@ mod tests {
         let mut async_io = RawSync::new(AlignedFile::new(file.try_clone().unwrap(), false));
         test_helpers::test_punch_hole_multiple_operations(&mut async_io, &mut file);
     }
+
+    /// A file whose `fsync(2)` fails: fsync on a pipe returns `EINVAL`.
+    fn file_whose_fsync_fails() -> std::fs::File {
+        let (reader, _writer) = std::io::pipe().unwrap();
+        std::fs::File::from(std::os::fd::OwnedFd::from(reader))
+    }
+
+    #[test]
+    fn fsync_failure_is_returned_to_the_caller() {
+        let mut async_io = RawSync::new(AlignedFile::new(file_whose_fsync_fails(), false));
+        assert!(matches!(async_io.fsync(None), Err(AsyncIoError::Fsync(_))));
+    }
 }

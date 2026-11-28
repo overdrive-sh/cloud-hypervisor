@@ -237,6 +237,7 @@ fn open_flat_vmdk(
 
 #[cfg(test)]
 mod tests {
+    use std::os::unix::fs::FileExt;
     use std::path::Path;
 
     use vmm_sys_util::tempfile::TempFile;
@@ -320,5 +321,24 @@ mod tests {
         };
         let disk = open_disk(&options, ImageType::Raw).unwrap();
         assert_eq!(disk.logical_size().unwrap(), size);
+    }
+
+    #[test]
+    fn explicit_raw_type_does_not_depend_on_header_bytes() {
+        // A guest owns the bytes of its data disk, including the first sector.
+        // An explicit `raw` must open whatever those bytes are.
+        for header in [
+            &0x5146_49fb_u32.to_be_bytes()[..],
+            &0x656c_6966_7864_6876_u64.to_le_bytes()[..],
+            b"# Disk DescriptorFile\nversion=1\n",
+        ] {
+            let tmp = TempFile::new().unwrap();
+            tmp.as_file().set_len(1 << 20).unwrap();
+            tmp.as_file().write_all_at(header, 0).unwrap();
+            let path = tmp.as_path().to_owned();
+            let options = default_options(&path);
+            let disk = open_disk(&options, ImageType::Raw).unwrap();
+            assert_eq!(disk.logical_size().unwrap(), 1 << 20);
+        }
     }
 }
